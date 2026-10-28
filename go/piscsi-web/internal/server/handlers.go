@@ -31,6 +31,12 @@ import (
 	pb "github.com/piscsi/piscsi/go/proto"
 )
 
+const (
+	contentDescriptionHeader = "Content-Description"
+	contentDispositionHeader = "Content-Disposition"
+	fileTransferDescription  = "File Transfer"
+)
+
 // serves the main control page
 func (s *Server) handleIndex(c *gin.Context) {
 	// Get base template data
@@ -180,6 +186,7 @@ func (s *Server) handleIndex(c *gin.Context) {
 	data["ShowUnits"] = showUnits
 	data["Files"] = files
 	data["FilesBySubdir"] = filesBySubdir
+	data["SharedFiles"] = sharedFiles(s.config.SharedDir)
 	data["ImageDir"] = s.config.BaseDir
 	data["ImageDirExists"] = imageDirExists
 	data["ImageRootDir"] = s.config.BaseDir
@@ -515,11 +522,11 @@ func deviceTypeName(deviceType pb.PbDeviceType) string {
 	case pb.PbDeviceType_SCCD:
 		return "SCSI CD-ROM"
 	case pb.PbDeviceType_SCBR:
-		return "Host Bridge"
+		return "X68000 Host Bridge"
 	case pb.PbDeviceType_SCDP:
-		return "Ethernet Adapter"
+		return "DaynaPort Ethernet Adapter"
 	case pb.PbDeviceType_SCLP:
-		return "Printer"
+		return "SCSI Printer"
 	case pb.PbDeviceType_SCHS:
 		return "Host Services"
 	case pb.PbDeviceType_SCTP:
@@ -1304,7 +1311,7 @@ func (s *Server) handleFilesUpload(c *gin.Context) {
 
 	s.logger.Info("File uploaded", "filename", filename, "size", fileSize, "destination", filepath.Dir(fullPath))
 	s.respond(c, ResponseOptions{
-		Message:     "File uploaded successfully",
+		Message:     fmt.Sprintf("File %q uploaded successfully to %q", filename, filepath.Dir(fullPath)),
 		RedirectURL: "/upload",
 	})
 }
@@ -1363,6 +1370,15 @@ func (s *Server) uploadDestination(formValues map[string]string) (string, error)
 	}
 }
 
+func setAttachmentHeader(c *gin.Context, filename string) {
+	c.Header(contentDispositionHeader, fmt.Sprintf("attachment; filename=%s", filename))
+}
+
+func setFileDownloadHeaders(c *gin.Context, filename string) {
+	c.Header(contentDescriptionHeader, fileTransferDescription)
+	setAttachmentHeader(c, filename)
+}
+
 // handles file downloads
 func (s *Server) handleFilesDownload(c *gin.Context) {
 	filename := c.Query("file")
@@ -1395,6 +1411,22 @@ func (s *Server) handleFilesDownload(c *gin.Context) {
 	realPath, err := resolvePathWithin(sourcePath, filename)
 	if err != nil {
 		c.String(http.StatusBadRequest, "Invalid filename")
+		return
+	}
+	if source == "config" {
+		file, info, err := openRegularFileWithin(sourcePath, filename)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				c.String(http.StatusNotFound, "File not found")
+			} else {
+				c.String(http.StatusBadRequest, "Invalid file")
+			}
+			return
+		}
+		defer file.Close()
+
+		setAttachmentHeader(c, filepath.Base(filename))
+		http.ServeContent(c.Writer, c.Request, filepath.Base(filename), info.ModTime(), file)
 		return
 	}
 
@@ -2000,27 +2032,20 @@ func (s *Server) handleFilesDownloadConfig(c *gin.Context) {
 		return
 	}
 
-	// Construct full path
-	fullPath := filepath.Join(s.config.ConfigDir, fileName)
-
-	// Verify path is within config directory
-	cleanPath := filepath.Clean(fullPath)
-	configDir := filepath.Clean(s.config.ConfigDir)
-	if !strings.HasPrefix(cleanPath, configDir) {
-		c.String(http.StatusBadRequest, "Invalid file path")
+	file, info, err := openRegularFileWithin(s.config.ConfigDir, fileName)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			c.String(http.StatusNotFound, "File not found: %s", fileName)
+		} else {
+			c.String(http.StatusBadRequest, "Invalid file")
+		}
 		return
 	}
-
-	// Check if file exists
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-		c.String(http.StatusNotFound, "File not found: %s", fileName)
-		return
-	}
+	defer file.Close()
 
 	// Serve the file for download
-	c.Header("Content-Description", "File Transfer")
-	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
-	c.File(fullPath)
+	setFileDownloadHeaders(c, fileName)
+	http.ServeContent(c.Writer, c.Request, fileName, info.ModTime(), file)
 }
 
 // performs an action on a configuration file (load, delete, or send)
@@ -2089,8 +2114,7 @@ func (s *Server) handleConfigAction(c *gin.Context) {
 			return
 		}
 
-		c.Header("Content-Description", "File Transfer")
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fileName))
+		setFileDownloadHeaders(c, fileName)
 		c.File(fullPath)
 		return
 	}
@@ -2146,22 +2170,70 @@ func (s *Server) handleLogsLevel(c *gin.Context) {
 	})
 }
 
+const (
+	defaultSystemLogLines = 100
+	maxSystemLogLines     = 1000
+	systemLogTimeout      = 10 * time.Second
+	logsTemplate          = "logs.html"
+	systemLogsTitle       = "PiSCSI System Logs"
+	allLogsScope          = "All logs"
+)
+
+var systemLogScopes = map[string]struct{}{
+	"piscsi":           {},
+	"piscsi-web":       {},
+	"piscsi-oled":      {},
+	"piscsi-ctrlboard": {},
+}
+
+func parseSystemLogRequest(linesValue, scope string) (int, string, error) {
+	lines := defaultSystemLogLines
+	if linesValue != "" {
+		parsed, err := strconv.Atoi(linesValue)
+		if err != nil || parsed < 1 || parsed > maxSystemLogLines {
+			return 0, "", fmt.Errorf("log lines must be between 1 and %d", maxSystemLogLines)
+		}
+		lines = parsed
+	}
+
+	if scope != "" {
+		if _, ok := systemLogScopes[scope]; !ok {
+			return 0, "", fmt.Errorf("invalid log scope")
+		}
+	}
+
+	return lines, scope, nil
+}
+
 // displays system logs
 func (s *Server) handleLogsShow(c *gin.Context) {
-	lines := c.DefaultPostForm("lines", "100")
+	linesValue := c.PostForm("lines")
 	scope := c.PostForm("scope")
+	lines, scope, err := parseSystemLogRequest(linesValue, scope)
+	if err != nil {
+		s.respond(c, ResponseOptions{
+			Error:    true,
+			Message:  err.Error(),
+			Template: logsTemplate,
+			TemplateData: gin.H{
+				"Title": systemLogsTitle,
+				"Scope": allLogsScope,
+				"Lines": defaultSystemLogLines,
+			},
+		})
+		return
+	}
 
 	// Build journalctl command
-	args := []string{}
-	if lines != "" {
-		args = append(args, "-n", lines)
-	}
+	args := []string{"--no-pager", "--lines=" + strconv.Itoa(lines)}
 	if scope != "" {
-		args = append(args, "-u", scope)
+		args = append(args, "--unit="+scope)
 	}
 
 	// Execute journalctl command
-	output, err := s.runSystemCommand("journalctl", args...)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), systemLogTimeout)
+	defer cancel()
+	output, err := s.runSystemCommandContext(ctx, "journalctl", args...)
 
 	logs := string(output)
 	if err != nil {
@@ -2170,14 +2242,14 @@ func (s *Server) handleLogsShow(c *gin.Context) {
 			message += ": " + details
 		}
 		data := s.getBaseTemplateData(c)
-		data["Title"] = "PiSCSI System Logs"
+		data["Title"] = systemLogsTitle
 		data["ErrorMessage"] = message
-		c.HTML(http.StatusInternalServerError, "logs.html", data)
+		c.HTML(http.StatusInternalServerError, logsTemplate, data)
 		return
 	}
 
 	// Prepare scope display text
-	scopeDisplay := "All logs"
+	scopeDisplay := allLogsScope
 	if scope != "" {
 		scopeDisplay = scope
 	}
@@ -2185,11 +2257,11 @@ func (s *Server) handleLogsShow(c *gin.Context) {
 	// Render the logs template
 	data := s.getBaseTemplateData(c)
 	data["Scope"] = scopeDisplay
-	data["Lines"] = lines
+	data["Lines"] = strconv.Itoa(lines)
 	data["Logs"] = logs
-	data["Title"] = "PiSCSI System Logs"
+	data["Title"] = systemLogsTitle
 
-	c.HTML(http.StatusOK, "logs.html", data)
+	c.HTML(http.StatusOK, logsTemplate, data)
 }
 
 // restarts the system
@@ -3059,6 +3131,24 @@ func transferSubdirectories(root string) []string {
 	return subdirectories
 }
 
+// sharedFiles returns the visible regular files directly in the shared
+// directory. These are available as sources when creating CD-ROM images.
+func sharedFiles(root string) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return []string{}
+	}
+
+	files := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") || !entry.Type().IsRegular() {
+			continue
+		}
+		files = append(files, entry.Name())
+	}
+	return files
+}
+
 // displays disk image information
 func (s *Server) handleFilesDiskinfo(c *gin.Context) {
 	fileName := c.PostForm("file_name")
@@ -3433,9 +3523,9 @@ func (s *Server) handleFilesCreateISO(c *gin.Context) {
 			isoPath, err = resolvePathWithin(s.config.BaseDir, fileName+".iso")
 		}
 	} else {
-		sourcePath, err = resolvePathWithin(s.config.BaseDir, localFile)
+		sourcePath, err = resolvePathWithin(s.config.SharedDir, localFile)
 		if err == nil {
-			isoPath, err = resolvePathWithin(s.config.BaseDir, localFile+".iso")
+			isoPath, err = resolvePathWithin(s.config.BaseDir, filepath.Base(localFile)+".iso")
 		}
 	}
 	if err != nil {
@@ -3470,7 +3560,7 @@ func (s *Server) handleFilesCreateISO(c *gin.Context) {
 	}
 
 	args := append(append([]string{}, isoArgs...), "-o", isoPath, sourcePath)
-	output, err := exec.Command("genisoimage", args...).CombinedOutput()
+	output, err := exec.Command("genisoimage", args...).CombinedOutput() //NOSONAR path protected by systemd policy
 	if err != nil {
 		_ = os.Remove(isoPath)
 		detail := strings.TrimSpace(string(output))

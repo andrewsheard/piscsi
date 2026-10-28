@@ -279,6 +279,12 @@ Please create the PiSCSI configuration dir to use configurations: {{.ConfigDir}}
             <td>
                 {{if .InUse}}
                     In use
+                    {{if not .IsArchive}}
+                    <form action="/files/diskinfo" method="post" class="file-info">
+                        <input name="file_name" type="hidden" value="{{.Name}}">
+                        <input type="submit" value="?" title="Info">
+                    </form>
+                    {{end}}
                 {{else}}
                 {{if .IsArchive}}
                 {{if .ArchiveContents}}
@@ -471,7 +477,7 @@ Please create the PiSCSI configuration dir to use configurations: {{.ConfigDir}}
     <ul>
         <li>Put disk images in {{.ImageDir}}</li>
         {{if .FileServerDirExists}}
-        <li>Put files to be shared over file sharing protocols in {{.SharedDir}}</li>
+        <li>Put files to be shared over file sharing protocols or used to create an ISO in {{.SharedDir}}</li>
         {{end}}
     </ul>
 </details>
@@ -572,10 +578,10 @@ Please create the PiSCSI configuration dir to use configurations: {{.ConfigDir}}
 </div>
 <div>
 <form action="/files/create_iso" method="post">
-    <label for="iso_file">Use local file:</label>
+    <label for="iso_file">Use shared file:</label>
     <select name="file" id="iso_file">
-        {{range .Files}}
-        <option value="{{.Name}}">{{.Name}}</option>
+        {{range .SharedFiles}}
+        <option value="{{.}}">{{.}}</option>
         {{end}}
     </select>
     <label for="iso_file_type">Type:</label>
