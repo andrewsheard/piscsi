@@ -213,7 +213,7 @@ func TestHandleAttach_HostBridgeUsesSelectedNetworkTopology(t *testing.T) {
 }
 
 func TestParseDeviceTypeSupportsEveryCurrentProtobufType(t *testing.T) {
-	for _, name := range []string{"SAHD", "SCHD", "SCRM", "SCMO", "SCCD", "SCBR", "SCDP", "SCHS", "SCLP", "SCTP"} {
+	for _, name := range []string{"SAHD", "SCHD", "SCRM", "SCMO", "SCCD", "SCBR", "SCDP", "SCHS", "SCLP", "SCTP", "SCPV"} {
 		t.Run(name, func(t *testing.T) {
 			got, err := parseDeviceType(strings.ToLower(name))
 			if err != nil {
@@ -301,6 +301,84 @@ func TestBuildDeviceCatalogUsesDaemonCapabilities(t *testing.T) {
 	}
 	if len(catalog[2].Files) != 1 || catalog[2].Files[0]["Name"] != "backup.tap" {
 		t.Fatalf("tape files = %#v", catalog[2].Files)
+	}
+}
+
+func TestBuildDeviceCatalogPowerViewControls(t *testing.T) {
+	server := &Server{}
+	info := &pb.PbDeviceTypesInfo{Properties: []*pb.PbDeviceTypeProperties{
+		{
+			Type: pb.PbDeviceType_SCPV,
+			Properties: &pb.PbDeviceProperties{
+				DefaultParams: map[string]string{"snapshot": "", "snapshot_interval": "250", "snapshot_full_refresh_only": "false"},
+			},
+		},
+	}}
+
+	catalog := server.buildDeviceCatalog(info, nil, nil)
+	if len(catalog) != 1 || catalog[0].Key != "SCPV" || catalog[0].Name != "PowerView Display Adapter" || catalog[0].SupportsFile {
+		t.Fatalf("unexpected PowerView catalog entry: %#v", catalog)
+	}
+	want := []deviceParameterControl{
+		{Key: "snapshot", Default: "", Kind: "text", Placeholder: "/tmp/powerview.ppm"},
+		{Key: "snapshot_full_refresh_only", Default: "false", Kind: "boolean", Placeholder: "false"},
+		{Key: "snapshot_interval", Default: "250", Kind: "number", Placeholder: "250"},
+	}
+	if !reflect.DeepEqual(catalog[0].Parameters, want) {
+		t.Fatalf("PowerView controls = %#v", catalog[0].Parameters)
+	}
+}
+
+func TestHandleAttach_PowerViewCheckboxParams(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, test := range []struct {
+		name   string
+		values []string
+		want   string
+	}{
+		{"checked", []string{"true", "false"}, "true"},
+		{"unchecked", []string{"false"}, "false"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var attached *pb.PbDeviceDefinition
+			server := &Server{
+				sessionStore: sessions.NewCookieStore([]byte("test-secret-key")),
+				config:       &config.Config{},
+				logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+				piscsiClient: &testutil.MockPiSCSIClient{SendCommandFunc: func(command *pb.PbCommand) (*pb.PbResult, error) {
+					if command.GetOperation() != pb.PbOperation_ATTACH {
+						t.Fatalf("unexpected operation %s", command.GetOperation())
+					}
+					attached = command.GetDevices()[0]
+					return &pb.PbResult{Status: true}, nil
+				}},
+			}
+
+			router := gin.New()
+			router.POST("/scsi/attach", server.handleAttach)
+			form := url.Values{
+				"scsi_id":                          {"6"},
+				"type":                             {"SCPV"},
+				"param_snapshot":                   {"/tmp/powerview.ppm"},
+				"param_snapshot_full_refresh_only": test.values,
+			}
+			request := httptest.NewRequest(http.MethodPost, "/scsi/attach", strings.NewReader(form.Encode()))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+
+			if response.Code != http.StatusSeeOther {
+				t.Fatalf("status = %d; body: %s", response.Code, response.Body.String())
+			}
+			if attached == nil || attached.GetType() != pb.PbDeviceType_SCPV {
+				t.Fatalf("attached device = %#v", attached)
+			}
+			params := attached.GetParams()
+			if params["snapshot"] != "/tmp/powerview.ppm" || params["snapshot_full_refresh_only"] != test.want {
+				t.Fatalf("PowerView params = %#v", params)
+			}
+		})
 	}
 }
 

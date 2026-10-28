@@ -386,6 +386,7 @@ Please create the PiSCSI configuration dir to use configurations: {{.ConfigDir}}
     </summary>
     <ul>
         <li>Read more about <a href="/sys/manpage?app=piscsi">supported device types</a> in the PiSCSI manual.</li>
+        <li>The PowerView Display Adapter can write its screen to a PPM image file. Enter a path such as /tmp/powerview.ppm in snapshot to enable this, or leave it empty to disable it. snapshot_interval limits how often the file is written, in milliseconds.</li>
     </ul>
 </details>
 <table border="black" cellpadding="3" summary="List of peripheral devices">
@@ -421,6 +422,9 @@ Please create the PiSCSI configuration dir to use configurations: {{.ConfigDir}}
                 <label for="param_{{$device.Key}}_{{.Key}}">{{.Key}}:</label>
                 {{if eq .Kind "number"}}
                 <input name="param_{{.Key}}" id="param_{{$device.Key}}_{{.Key}}" type="number" value="{{.Default}}">
+                {{else if eq .Kind "boolean"}}
+                <input name="param_{{.Key}}" id="param_{{$device.Key}}_{{.Key}}" type="checkbox" value="true"{{if eq .Default "true"}} checked{{end}}>
+                <input name="param_{{.Key}}" type="hidden" value="false">
                 {{else if eq .Kind "interface"}}
                 <select name="param_{{.Key}}" id="param_{{$device.Key}}_{{.Key}}">
                     {{range .Options}}
@@ -428,7 +432,7 @@ Please create the PiSCSI configuration dir to use configurations: {{.ConfigDir}}
                     {{end}}
                 </select>
                 {{else}}
-                <input name="param_{{.Key}}" id="param_{{$device.Key}}_{{.Key}}" type="text" value="{{.Default}}" placeholder="{{.Default}}">
+                <input name="param_{{.Key}}" id="param_{{$device.Key}}_{{.Key}}" type="text" value="{{.Default}}" placeholder="{{.Placeholder}}">
                 {{end}}
                 {{end}}
                 {{if .SupportsFile}}

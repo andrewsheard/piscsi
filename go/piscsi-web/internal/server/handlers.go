@@ -539,10 +539,21 @@ func deviceTypeName(deviceType pb.PbDeviceType) string {
 }
 
 type deviceParameterControl struct {
-	Key     string
-	Default string
-	Kind    string
-	Options []string
+	Key         string
+	Default     string
+	Kind        string
+	Placeholder string
+	Options     []string
+}
+
+// suggests a value for parameters whose empty default disables a feature.
+func parameterPlaceholder(deviceType pb.PbDeviceType, key string, defaultValue string) string {
+	// An empty PowerView snapshot path disables snapshots. /tmp is a RAM disk
+	// on current Raspberry Pi OS, so frequent snapshots do not wear the SD card.
+	if deviceType == pb.PbDeviceType_SCPV && key == "snapshot" {
+		return "/tmp/powerview.ppm"
+	}
+	return defaultValue
 }
 
 type deviceCatalogEntry struct {
@@ -603,11 +614,14 @@ func (s *Server) buildDeviceCatalog(
 			}
 			defaultValue := properties.GetDefaultParams()[key]
 			control := deviceParameterControl{
-				Key:     key,
-				Default: defaultValue,
-				Kind:    "text",
+				Key:         key,
+				Default:     defaultValue,
+				Kind:        "text",
+				Placeholder: parameterPlaceholder(deviceType, key, defaultValue),
 			}
-			if key == "interface" {
+			if defaultValue == "true" || defaultValue == "false" {
+				control.Kind = "boolean"
+			} else if key == "interface" {
 				control.Kind = "interface"
 				for _, networkInterface := range networkInterfaces {
 					if networkInterface.GetUp() {

@@ -378,6 +378,18 @@ func getMockDeviceTypesInfo() *pb.PbDeviceTypesInfo {
 					BlockSizes:     []uint32{512, 1024, 2048},
 				},
 			},
+			{
+				Type: pb.PbDeviceType_SCPV,
+				Properties: &pb.PbDeviceProperties{
+					SupportsParams: true,
+					Luns:           32,
+					DefaultParams: map[string]string{
+						"snapshot":                   "",
+						"snapshot_interval":          "250",
+						"snapshot_full_refresh_only": "false",
+					},
+				},
+			},
 		},
 	}
 }
